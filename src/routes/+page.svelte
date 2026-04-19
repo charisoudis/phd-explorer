@@ -1,82 +1,69 @@
 <script lang="ts">
     import { invalidateAll } from '$app/navigation';
-    import type { PageData } from './$types';
+    import type { PageProps } from './$types';
     import {
         Search, MapPin, Clock, ExternalLink, RefreshCw, LoaderCircle,
         Database, ShieldCheck, Cpu, Info
     } from 'lucide-svelte';
     import Chart from 'chart.js/auto';
 
-    // 1. Properly type the data prop to clear WebStorm errors
-    let { data }: { data: PageData } = $props();
+    // 1. Properly destructure with PageProps type
+    let { data }: PageProps = $props();
 
-    // 2. Pure Derivations (No more Vite warnings about initial state tracking)
-    let status = $derived(data.status || { isRunning: false });
+    // 2. Purely derived state from data
+    // Note: status now has all its properties typed correctly
+    let status = $derived(data.status);
     let jobsData = $derived(data.jobsData?.data || []);
     let fetchDate = $derived(data.jobsData?.metadata?.fetchDate);
 
-    // Client-side loading state
     let isClientLoaded = $state(false);
-
-    // Filters
     let uniFilter = $state('All');
     let focusFilter = $state('All');
 
-    let universities = $derived(['All', ...new Set(jobsData.map((j: any) => j.university))]);
-    let focusAreas = $derived(['All', ...new Set(jobsData.map((j: any) => j.focus))]);
+    let universities = $derived(['All', ...new Set(jobsData.map((j) => j.university))]);
+    let focusAreas = $derived(['All', ...new Set(jobsData.map((j) => j.focus))]);
 
-    let filteredJobs = $derived(jobsData.filter((j: any) => {
+    let filteredJobs = $derived(jobsData.filter((j) => {
         const matchUni = uniFilter === 'All' || j.university === uniFilter;
         const matchFocus = focusFilter === 'All' || j.focus === focusFilter;
         return matchUni && matchFocus;
     }));
 
-    // Chart Reference
     let chartCanvas = $state<HTMLCanvasElement | null>(null);
     let chartInstance: Chart | null = null;
     const INDIGO_PALETTE = ['#312e81', '#3730a3', '#4f46e5', '#6366f1', '#818cf8', '#a5b4fc'];
 
-    // 3. Simplified Polling: Let SvelteKit's invalidateAll handle the heavy lifting
+    // 3. Effect for Polling
     $effect(() => {
         let interval: ReturnType<typeof setInterval>;
         if (status.isRunning) {
             interval = setInterval(() => {
-                invalidateAll(); // This automatically refetches server data and updates our $derived vars!
+                invalidateAll();
             }, 3000);
         }
         return () => { if (interval) clearInterval(interval); };
     });
 
-    // Derived text for the loading overlay
+    // 4. Derived loading text using the typed status properties
     let currentResearchStep = $derived(() => {
-        if (status.step1Gemini === 'loading' || status.step1OpenAI === 'loading') return "Scanning portals & running deep research via Gemini & OpenAI...";
-        if (status.step2Combine === 'loading') return "Cross-validating data & merging multi-agent outputs...";
-        if (status.step3Parse === 'loading') return "Structuring findings into strict JSON schema...";
-        if (status.isRunning) return "Initializing pipeline...";
+        if (status.step1Gemini === 'loading' || status.step1OpenAI === 'loading') return "Deep research in progress...";
+        if (status.step2Combine === 'loading') return "Cross-validating data...";
+        if (status.step3Parse === 'loading') return "Structuring findings...";
+        if (status.isRunning) return "Initializing...";
         return "";
     });
 
-    // 4. Client Mount & Chart Rendering
+    // 5. Chart Rendering
     $effect(() => {
-        isClientLoaded = true; // Dismiss the initial loader once mounted
-
-        const jobs = filteredJobs;
+        isClientLoaded = true;
         const canvas = chartCanvas;
-
-        if (chartInstance) {
-            chartInstance.destroy();
-            chartInstance = null;
-        }
-
-        if (!canvas || jobs.length === 0) return;
+        if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+        if (!canvas || filteredJobs.length === 0) return;
 
         const focusCounts: Record<string, number> = {};
-        jobs.forEach((job: any) => {
+        filteredJobs.forEach((job) => {
             focusCounts[job.focus] = (focusCounts[job.focus] || 0) + 1;
         });
-
-        Chart.defaults.color = '#312e81';
-        Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
 
         chartInstance = new Chart(canvas, {
             type: 'doughnut',
@@ -94,26 +81,21 @@
                 maintainAspectRatio: false,
                 cutout: '70%',
                 plugins: {
-                    legend: { position: 'right', labels: { boxWidth: 10, padding: 12, font: { size: 12, weight: 'bold' } } },
-                    tooltip: { backgroundColor: '#312e81', padding: 12, cornerRadius: 8, displayColors: false }
+                    legend: { position: 'right', labels: { boxWidth: 10, padding: 12, font: { weight: 'bold' } } }
                 }
             }
         });
-
-        return () => {
-            if (chartInstance) {
-                chartInstance.destroy();
-                chartInstance = null;
-            }
-        };
     });
 
     async function runDeepResearch() {
         if (status.isRunning) return;
-        uniFilter = 'All';
-        focusFilter = 'All';
-        // Send request and immediately invalidate to kick off the polling cycle
-        fetch('/api/cron').catch(console.error);
+        const passcode = prompt('Enter Admin Passcode:');
+        if (!passcode) return;
+
+        fetch('/api/cron', {
+            headers: { 'Authorization': `Bearer ${passcode}` }
+        }).catch(console.error);
+
         await invalidateAll();
     }
 

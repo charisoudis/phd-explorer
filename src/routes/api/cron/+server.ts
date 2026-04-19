@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import { Redis } from '@upstash/redis'; // Updated import
 import { GoogleGenAI } from '@google/genai';
 import OpenAI from 'openai';
-import { OPENAI_API_KEY, GEMINI_API_KEY, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN } from '$env/static/private';
+import { OPENAI_API_KEY, GEMINI_API_KEY, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, ADMIN_PASSCODE, CRON_SECRET } from '$env/static/private';
 
 export const config = {
     maxDuration: 300
@@ -20,7 +20,20 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const UNIVERSITIES = 'ETHZ, EPFL, UZH, UniBasel, UniBern';
 const RESEARCH_PROMPT = `Research open PhD placements at the following Swiss universities: ${UNIVERSITIES}. Find the job title, location, deadline, focus area, link, and a short description.`;
 
-export async function GET() {
+export async function GET({ request }) {
+    // --- AUTHENTICATION CHECK ---
+    const authHeader = request.headers.get('authorization');
+    const providedToken = authHeader?.split(' ')[1]; // Extracts token from "Bearer <token>"
+
+    // Get valid tokens (Admin passcode for UI, Cron Secret for Vercel's automated runs)
+    const validTokens = [ADMIN_PASSCODE, CRON_SECRET].filter(Boolean);
+
+    if (!providedToken || !validTokens.includes(providedToken)) {
+        console.warn('Unauthorized attempt to trigger AI pipeline.');
+        return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+    }
+    // -------------------------------
+
     let status = {
         isRunning: true,
         step1Gemini: 'loading',
