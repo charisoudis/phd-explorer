@@ -2,7 +2,8 @@ import { json } from '@sveltejs/kit';
 import { Redis } from '@upstash/redis'; // Updated import
 import { GoogleGenAI } from '@google/genai';
 import OpenAI from 'openai';
-import { OPENAI_API_KEY, GEMINI_API_KEY, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, ADMIN_PASSCODE, CRON_SECRET } from '$env/static/private';
+import { OPENAI_API_KEY, GEMINI_API_KEY, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, ADMIN_PASSCODE } from '$env/static/private';
+import { env } from '$env/dynamic/private';
 
 export const config = {
     maxDuration: 300
@@ -26,7 +27,7 @@ export async function GET({ request }) {
     const providedToken = authHeader?.split(' ')[1]; // Extracts token from "Bearer <token>"
 
     // Get valid tokens (Admin passcode for UI, Cron Secret for Vercel's automated runs)
-    const validTokens = [ADMIN_PASSCODE, CRON_SECRET].filter(Boolean);
+    const validTokens = [ADMIN_PASSCODE, env.CRON_SECRET].filter(Boolean);
 
     if (!providedToken || !validTokens.includes(providedToken)) {
         console.warn('Unauthorized attempt to trigger AI pipeline.');
