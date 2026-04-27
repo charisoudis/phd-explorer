@@ -7,18 +7,25 @@
     } from 'lucide-svelte';
     import Chart from 'chart.js/auto';
 
-    // 1. Properly destructure with PageProps type
     let { data }: PageProps = $props();
 
-    // 2. Purely derived state from data
-    // Note: status now has all its properties typed correctly
+    // 1. UI States
+    let isTriggering = $state(false); // Optimistic UI trigger
+    let isClientLoaded = $state(false);
+    let uniFilter = $state('All');
+    let focusFilter = $state('All');
+
+    // 2. Derived state from server data
     let status = $derived(data.status);
     let jobsData = $derived(data.jobsData?.data || []);
     let fetchDate = $derived(data.jobsData?.metadata?.fetchDate);
 
-    let isClientLoaded = $state(false);
-    let uniFilter = $state('All');
-    let focusFilter = $state('All');
+    // Sync: Turn off local triggering once the server confirms it's running
+    $effect(() => {
+        if (status.isRunning && isTriggering) {
+            isTriggering = false;
+        }
+    });
 
     let universities = $derived(['All', ...new Set(jobsData.map((j) => j.university))]);
     let focusAreas = $derived(['All', ...new Set(jobsData.map((j) => j.focus))]);
@@ -29,41 +36,44 @@
         return matchUni && matchFocus;
     }));
 
-    let chartCanvas = $state<HTMLCanvasElement | null>(null);
-    let chartInstance: Chart | null = null;
-    const INDIGO_PALETTE = ['#312e81', '#3730a3', '#4f46e5', '#6366f1', '#818cf8', '#a5b4fc'];
-
-    // 3. Effect for Polling
+    // 3. Polling Logic (Updated to 20 seconds)
     $effect(() => {
         let interval: ReturnType<typeof setInterval>;
         if (status.isRunning) {
             interval = setInterval(() => {
                 invalidateAll();
-            }, 3000);
+            }, 20000); // 20 seconds
         }
         return () => { if (interval) clearInterval(interval); };
     });
 
-    // 4. Derived loading text using the typed status properties
-    let currentResearchStep = $derived(() => {
-        if (status.step1Gemini === 'loading' || status.step1OpenAI === 'loading') return "Deep research in progress...";
-        if (status.step2Combine === 'loading') return "Cross-validating data...";
-        if (status.step3Parse === 'loading') return "Structuring findings...";
-        if (status.isRunning) return "Initializing...";
-        return "";
-    });
+    // 4. Chart Logic (Stabilized against flickering)
+    let chartCanvas = $state<HTMLCanvasElement | null>(null);
+    let chartInstance: Chart | null = null;
+    let lastChartDataJson = $state(""); // Track actual data to prevent redraws
 
-    // 5. Chart Rendering
+    const INDIGO_PALETTE = ['#312e81', '#3730a3', '#4f46e5', '#6366f1', '#818cf8', '#a5b4fc'];
+
     $effect(() => {
         isClientLoaded = true;
         const canvas = chartCanvas;
-        if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
         if (!canvas || filteredJobs.length === 0) return;
 
+        // Calculate distribution
         const focusCounts: Record<string, number> = {};
         filteredJobs.forEach((job) => {
             focusCounts[job.focus] = (focusCounts[job.focus] || 0) + 1;
         });
+
+        // FIX: Only redraw if the data values actually changed
+        const currentDataJson = JSON.stringify(focusCounts);
+        if (currentDataJson === lastChartDataJson && chartInstance) return;
+
+        lastChartDataJson = currentDataJson;
+
+        if (chartInstance) {
+            chartInstance.destroy();
+        }
 
         chartInstance = new Chart(canvas, {
             type: 'doughnut',
@@ -80,11 +90,24 @@
                 responsive: true,
                 maintainAspectRatio: false,
                 cutout: '70%',
+                animation: { duration: 400 },
                 plugins: {
-                    legend: { position: 'right', labels: { boxWidth: 10, padding: 12, font: { weight: 'bold' } } }
+                    legend: {
+                        position: 'right',
+                        labels: { boxWidth: 10, padding: 12, font: { weight: 'bold', size: 11 } }
+                    }
                 }
             }
         });
+    });
+
+    // 5. Loading Text
+    let currentResearchStep = $derived(() => {
+        if (status.step1Gemini === 'loading' || status.step1OpenAI === 'loading') return "Deep research in progress...";
+        if (status.step2Combine === 'loading') return "Cross-validating data...";
+        if (status.step3Parse === 'loading') return "Structuring findings...";
+        if (isTriggering || status.isRunning) return "Initializing AI Agents...";
+        return "";
     });
 
     async function runDeepResearch() {
@@ -92,11 +115,26 @@
         const passcode = prompt('Enter Admin Passcode:');
         if (!passcode) return;
 
-        fetch('/api/cron', {
-            headers: { 'Authorization': `Bearer ${passcode}` }
-        }).catch(console.error);
+        // Optimistic UI: Show modal immediately
+        isTriggering = true;
 
-        await invalidateAll();
+        try {
+            const response = await fetch('/api/cron', {
+                headers: { 'Authorization': `Bearer ${passcode}` }
+            });
+
+            if (response.status === 401) {
+                alert("Unauthorized: Invalid Passcode");
+                isTriggering = false;
+                return;
+            }
+
+            // Immediately invalidate to start the polling cycle
+            await invalidateAll();
+        } catch (e) {
+            console.error(e);
+            isTriggering = false;
+        }
     }
 
     function getUniversityLogo(uni: string) {
@@ -114,13 +152,13 @@
 <div class="min-h-screen bg-indigo-50 text-indigo-950 font-sans p-4 md:p-8 relative">
 
     {#if !isClientLoaded}
-        <div class="absolute inset-0 z-40 bg-indigo-50 flex flex-col items-center justify-center">
+        <div class="fixed inset-0 z-40 bg-indigo-50 flex flex-col items-center justify-center">
             <LoaderCircle class="w-10 h-10 text-indigo-600 animate-spin mb-4" />
             <p class="text-indigo-900 font-medium animate-pulse">Initializing Dashboard...</p>
         </div>
     {/if}
 
-    {#if status.isRunning}
+    {#if isTriggering || status.isRunning}
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-indigo-950/80 backdrop-blur-sm transition-opacity duration-300">
             <div class="bg-white p-8 rounded-2xl shadow-2xl max-w-md w-full border border-indigo-100 transform transition-all scale-100">
                 <div class="flex items-center gap-4 mb-6">
@@ -175,11 +213,11 @@
             <div class="relative group">
                 <button
                         onclick={runDeepResearch}
-                        disabled={status.isRunning}
+                        disabled={isTriggering || status.isRunning}
                         class="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-semibold transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                    <RefreshCw class="w-5 h-5 {status.isRunning ? 'animate-spin' : ''}" />
-                    {status.isRunning ? 'Running...' : 'Run Deep Research'}
+                    <RefreshCw class="w-5 h-5 {isTriggering || status.isRunning ? 'animate-spin' : ''}" />
+                    {isTriggering || status.isRunning ? 'Running...' : 'Run Deep Research'}
                 </button>
             </div>
         </header>
@@ -223,20 +261,20 @@
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {#each filteredJobs as job}
+            {#each filteredJobs as job (job.id)}
                 <div class="bg-white rounded-2xl p-6 border border-indigo-100 hover:border-indigo-300 shadow-sm hover:shadow-lg transition-all flex flex-col group relative overflow-hidden">
                     <div class="flex justify-between items-start mb-4">
                         {#if getUniversityLogo(job.university)}
                             <img src={getUniversityLogo(job.university)} alt={job.university} class="h-6 object-contain opacity-80" />
                         {:else}
-							<span class="bg-indigo-100 text-indigo-800 text-xs font-bold px-2.5 py-1 rounded-md uppercase tracking-wide">
-								{job.university}
-							</span>
+                            <span class="bg-indigo-100 text-indigo-800 text-xs font-bold px-2.5 py-1 rounded-md uppercase tracking-wide">
+                                {job.university}
+                            </span>
                         {/if}
 
                         <span class="flex items-center gap-1 text-indigo-400 text-xs font-semibold whitespace-nowrap bg-indigo-50 px-2 py-1 rounded">
-							<Clock class="w-3 h-3" /> {job.deadline}
-						</span>
+                            <Clock class="w-3 h-3" /> {job.deadline}
+                        </span>
                     </div>
 
                     <h3 class="text-lg font-bold text-indigo-950 leading-tight mb-2 group-hover:text-indigo-600 transition-colors">{job.title}</h3>
@@ -271,6 +309,5 @@
                 </div>
             {/if}
         </div>
-
     </div>
 </div>
