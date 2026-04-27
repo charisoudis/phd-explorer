@@ -19,11 +19,20 @@ const redis = new Redis({ url: UPSTASH_REDIS_REST_URL, token: UPSTASH_REDIS_REST
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-const UNIVERSITIES = 'ETHZ, EPFL, UZH, UniBasel, UniBern';
-const RESEARCH_PROMPT = `Research open 100% PhD placements at the following Swiss universities: ${UNIVERSITIES}. Focus on Computer Vision, 3D Vision, and Foundation Models. Find the job title, university, location, deadline, focus area, link, and a short description.`;
+const UNIVERSITIES = 'ETHZ, EPFL, UZH, UniBasel, UniBern, UniGeneva';
+
+// IMPROVED PROMPT: Strict focus on URL validity
+const RESEARCH_PROMPT = `
+    Find open PhD positions (100% employment) at ${UNIVERSITIES}. 
+    Focus: Computer Vision, 3D Vision, Foundation Models, or Robotics.
+    
+    CRITICAL INSTRUCTION FOR LINKS: 
+    For every position, you MUST provide the DIRECT PERMANENT LINK to the university's internal recruitment portal (e.g., jobs.ethz.ch, epfl.ch/about/working, etc.). 
+    DO NOT provide search result URLs, truncated links, or homepages. 
+    If you cannot find the direct job post URL, do not include the position.
+`;
 
 export async function GET({ request }) {
-    // --- 1. AUTHENTICATION ---
     const authHeader = request.headers.get('authorization');
     const providedToken = authHeader?.split(' ')[1];
     const validTokens = [ADMIN_PASSCODE, env.CRON_SECRET].filter(Boolean);
@@ -38,9 +47,7 @@ export async function GET({ request }) {
     try {
         await updateStatus({});
 
-        // --- PHASE 1: Parallel Research ---
         const [geminiResult, openaiRaw] = await Promise.all([
-            // Task A: Gemini Deep Research Agent
             (async () => {
                 let current = await ai.interactions.create({
                     input: RESEARCH_PROMPT,
@@ -49,29 +56,16 @@ export async function GET({ request }) {
                 });
 
                 while (current.status !== "completed") {
-                    if (current.status === "failed") {
-                        // Cast to any to access error property which may be missing in the type def
-                        const errorMsg = (current as any).error || "Unknown Agent Error";
-                        throw new Error(`Gemini Agent Failed: ${errorMsg}`);
-                    }
+                    if (current.status === "failed") throw new Error(`Gemini Agent Failed: ${(current as any).error}`);
                     await new Promise(r => setTimeout(r, 10000));
                     current = await ai.interactions.get(current.id);
                 }
-
                 await updateStatus({ step1Gemini: 'complete' });
-
-                // Check if outputs exist to satisfy TS18048
-                if (current.outputs && current.outputs.length > 0) {
-                    const finalOutput = current.outputs[current.outputs.length - 1];
-                    // Verify that the output has text (handling multimodal response types)
-                    if (typeof finalOutput === 'object' && 'text' in finalOutput) {
-                        return (finalOutput as { text: string }).text;
-                    }
-                }
-                throw new Error("Gemini Agent completed but returned no text results.");
+                const outputs = current.outputs || [];
+                const finalOutput = outputs[outputs.length - 1];
+                return (finalOutput as any).text;
             })(),
 
-            // Task B: OpenAI o3-mini
             openai.chat.completions.create({
                 model: 'o3-mini',
                 messages: [{ role: 'user', content: RESEARCH_PROMPT }]
@@ -81,15 +75,29 @@ export async function GET({ request }) {
             })
         ]);
 
-        // --- PHASE 2: Combine & Validate ---
+        // --- PHASE 2: Strict Validation & Merging ---
         await updateStatus({ step2Combine: 'loading' });
+
+        const combinePrompt = `
+            You are a data validator. Merge these two PhD research outputs:
+            Output 1: ${geminiResult}
+            Output 2: ${openaiRaw}
+
+            STRICT LINK VALIDATION RULES:
+            1. Every link must be a full URL (starting with https://).
+            2. DISCARD any listing where the link looks like a search snippet (ends in "..." or is clearly incomplete).
+            3. DISCARD any listing where the link is just the general university homepage.
+            4. DISCARD any listing where the link returns a 404 in your simulation or looks "guessed" (e.g., jobid=xyz).
+            5. Ensure the links point directly to portals like jobs.ethz.ch, recruiting.uzh.ch, or similar.
+            
+            Return the merged, validated list in plain text.
+        `;
 
         const mergeRes = await ai.models.generateContent({
             model: "gemini-3.1-pro-preview",
-            contents: [{ role: 'user', parts: [{ text: `Merge and cross-validate these PhD listings for Switzerland. Remove duplicates. Output 1: ${geminiResult} Output 2: ${openaiRaw}` }] }]
+            contents: [{ role: 'user', parts: [{ text: combinePrompt }] }]
         });
 
-        // Use type-casting to access .text if the Content_2 type is being difficult
         const combinedText = (mergeRes as any).text || "";
         await updateStatus({ step2Combine: 'complete' });
 
@@ -99,27 +107,38 @@ export async function GET({ request }) {
         const schema = {
             type: 'object',
             properties: {
-                metadata: { type: 'object', properties: { fetchDate: { type: 'string' }, prompt: { type: 'string' }, rawResponse: { type: 'string' } }, required: ['fetchDate', 'prompt', 'rawResponse'] },
-                data: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' }, university: { type: 'string' }, location: { type: 'string' }, deadline: { type: 'string' }, focus: { type: 'string' }, link: { type: 'string' }, desc: { type: 'string' } }, required: ['id', 'title', 'university', 'location', 'deadline', 'focus', 'link', 'desc'] } }
+                metadata: { type: 'object', properties: { fetchDate: { type: 'string' } }, required: ['fetchDate'] },
+                data: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            id: { type: 'string' },
+                            title: { type: 'string' },
+                            university: { type: 'string' },
+                            location: { type: 'string' },
+                            deadline: { type: 'string' },
+                            focus: { type: 'string' },
+                            link: { type: 'string' },
+                            desc: { type: 'string' }
+                        },
+                        required: ['id', 'title', 'university', 'location', 'deadline', 'focus', 'link', 'desc']
+                    }
+                }
             },
             required: ['metadata', 'data']
         };
 
         const finalParsing = await ai.models.generateContent({
             model: "gemini-3-flash-preview",
-            contents: [{ role: 'user', parts: [{ text: `Format this as JSON based on the schema: ${combinedText}` }] }],
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: schema as any
-            }
+            contents: [{ role: 'user', parts: [{ text: `Convert this into JSON. If a link looks broken or suspicious, do not include the item: ${combinedText}` }] }],
+            config: { responseMimeType: "application/json", responseSchema: schema as any }
         });
 
         const jsonText = (finalParsing as any).text;
         if (jsonText) {
             const parsedData = JSON.parse(jsonText);
             parsedData.metadata.fetchDate = new Date().toISOString();
-            parsedData.metadata.prompt = RESEARCH_PROMPT;
-            parsedData.metadata.rawResponse = combinedText;
             await redis.set('phd_jobs_data', parsedData);
         }
 

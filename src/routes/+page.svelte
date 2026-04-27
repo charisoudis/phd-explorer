@@ -290,6 +290,7 @@
                         <span class="text-xs font-bold text-indigo-500 uppercase tracking-wider bg-indigo-50 px-3 py-1.5 rounded-lg">{job.focus}</span>
                         <a
                                 href={job.link}
+                                onclick={(e) => { if (!job.link.startsWith('http')) e.preventDefault(); }}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 class="p-2.5 rounded-lg bg-indigo-50 hover:bg-indigo-600 text-indigo-600 hover:text-white transition-colors flex items-center justify-center shadow-sm"
